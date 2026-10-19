@@ -9,7 +9,7 @@ import threading
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QIntValidator
+from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QFont, QIntValidator
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -30,7 +30,6 @@ from PyQt6.QtWidgets import (
 
 from archive_validator import (
     ValidationError,
-    VALIDATION_ERROR_MSG,
     collect_from_folder,
     is_archive,
     validate_and_extract,
@@ -45,6 +44,12 @@ TEXT_MAIN = "#FFFFFF"
 TEXT_SUB = "#E0E0E0"
 ACCENT = "#007ACC"
 ERROR = "#D32F2F"
+
+# Текст подсказки — ТЗ п.5.2 (Верхняя зона)
+HINT_TEXT = (
+    "Перетащите сюда папку или архив с изображениями (.zip, .rar) "
+    "или нажмите кнопку «Обзор»"
+)
 
 INTERP_ITEMS = ["Lanczos (Рекомендуется)", "Bicubic", "Bilinear"]
 
@@ -86,17 +91,21 @@ class ImageConverterWindow(QWidget):
     sig_busy = pyqtSignal(bool)
     sig_error = pyqtSignal(str)
     sig_drop_error = pyqtSignal()
+    sig_beep = pyqtSignal()
 
     def __init__(self):
         super().__init__()
         self.setWindowTitle("PixelForge — Конвертер изображений")
         self.setFixedSize(800, 600)
         self.setAcceptDrops(True)
-        self.setStyleSheet(f"background-color: {BG}; color: {TEXT_SUB};")
+        self.setStyleSheet(
+            f"background-color: {BG}; color: {TEXT_SUB}; font-family: 'Segoe UI';"
+        )
 
         self.cfg = ConfigManager()
         self.tm = ThreadManager()
         self.source_files: list[Path] = []
+        self.source_from_cache = False  # источник лежит в .cache_processing
         self.working = False
         self.cache_dir = get_cache_dir()
 
@@ -111,55 +120,64 @@ class ImageConverterWindow(QWidget):
         return f"QFrame {{ background-color: {PANEL}; border-radius: 6px; }}"
 
     def _build(self):
-        # Верхняя зона: импорт
+        # Верхняя зона: импорт (Drag-and-Drop) — ТЗ п.5.2
         self.drop_frame = DropFrame(self)
-        self.drop_frame.setGeometry(12, 12, 776, 130)
+        self.drop_frame.setGeometry(12, 12, 776, 156)
         self.drop_frame.setStyleSheet(
             f"QFrame {{ background-color: {PANEL}; border: 2px dashed {ACCENT}; border-radius: 6px; }}"
         )
         dl = QVBoxLayout(self.drop_frame)
-        dl.setContentsMargins(10, 8, 10, 8)
-        arrow = QLabel("⬆")
-        arrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        arrow.setStyleSheet(f"font-size: 22px; color: {TEXT_MAIN}; border: none; background: transparent;")
-        dl.addWidget(arrow)
-        self.source_label = QLabel("Перетащите сюда папку или архив (.zip, .rar, .7z) или нажмите «Обзор»")
-        self.source_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        dl.setContentsMargins(14, 10, 14, 10)
+        dl.addStretch(1)
+
+        drow = QHBoxLayout()
+        drow.setSpacing(16)
+        # Иконка папки/архива по центру зоны — ТЗ п.5.2
+        icon = QLabel("📁")
+        icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon.setStyleSheet(f"font-size: 30px; color: {TEXT_MAIN}; border: none; background: transparent;")
+        drow.addWidget(icon)
+
+        self.source_label = QLabel(HINT_TEXT)
         self.source_label.setWordWrap(True)
         self.source_label.setStyleSheet(f"color: {TEXT_SUB}; border: none; background: transparent;")
-        dl.addWidget(self.source_label)
-        btn_row = QHBoxLayout()
-        btn_row.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        drow.addWidget(self.source_label, 1)
+
+        # Кнопка «Обзор» справа от текста — ТЗ п.5.2
+        btn_col = QVBoxLayout()
+        btn_col.setSpacing(6)
         self.btn_browse = QPushButton("Обзор")
-        self.btn_browse.setFixedWidth(100)
         self.btn_browse.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_browse.setStyleSheet(
             f"QPushButton {{ background-color: {ACCENT}; color: white; border: none; "
             f"border-radius: 6px; padding: 6px; }} QPushButton:disabled {{ background-color: #555; }}"
         )
         self.btn_browse.clicked.connect(self.on_browse_source)
-        btn_row.addWidget(self.btn_browse)
+        btn_col.addWidget(self.btn_browse)
         self.btn_outdir = QPushButton("Папка вывода")
-        self.btn_outdir.setFixedWidth(130)
         self.btn_outdir.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_outdir.setStyleSheet(
             "QPushButton { background-color: #3a3a3a; color: white; border: none; "
             "border-radius: 6px; padding: 6px; }"
         )
         self.btn_outdir.clicked.connect(self.on_browse_output)
-        btn_row.addWidget(self.btn_outdir)
-        dl.addLayout(btn_row)
+        btn_col.addWidget(self.btn_outdir)
+        drow.addLayout(btn_col)
+
+        dl.addLayout(drow)
+        dl.addStretch(1)
         self.drop_frame.file_dropped.connect(self.load_source_str)
 
-        # Средняя зона: настройки
+        # Средняя зона: панель настроек (слева) — ТЗ п.5.2
         self.settings = QFrame(self)
-        self.settings.setGeometry(12, 150, 260, 300)
+        self.settings.setGeometry(12, 176, 260, 274)
         self.settings.setStyleSheet(self._panel_style())
         sl = QVBoxLayout(self.settings)
         sl.setContentsMargins(12, 10, 12, 10)
-        sl.setSpacing(4)
+        sl.setSpacing(3)
         title = QLabel("НАСТРОЙКИ")
-        title.setStyleSheet(f"color: {TEXT_MAIN}; font-weight: bold;")
+        # Заголовки блоков: 14–16 пт — ТЗ п.5.1
+        title.setStyleSheet(f"color: {TEXT_MAIN}; font-size: 14pt; font-weight: bold;")
         sl.addWidget(title)
 
         sl.addWidget(self._sub("Формат вывода"))
@@ -210,14 +228,14 @@ class ImageConverterWindow(QWidget):
         sl.addWidget(self.keep_check)
         sl.addStretch(1)
 
-        # Лог
+        # Правая центральная часть: окно логов (Terminal Log) — ТЗ п.5.2
         log_frame = QFrame(self)
-        log_frame.setGeometry(282, 150, 506, 300)
+        log_frame.setGeometry(282, 176, 506, 274)
         log_frame.setStyleSheet(self._panel_style())
         ll = QVBoxLayout(log_frame)
         ll.setContentsMargins(12, 10, 12, 10)
         log_title = QLabel("ЖУРНАЛ ВЫВОДА")
-        log_title.setStyleSheet(f"color: {TEXT_SUB}; font-weight: bold;")
+        log_title.setStyleSheet(f"color: {TEXT_SUB}; font-size: 14pt; font-weight: bold;")
         ll.addWidget(log_title)
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
@@ -226,11 +244,9 @@ class ImageConverterWindow(QWidget):
         )
         ll.addWidget(self.log_box)
 
-        # Нижняя зона
-        self.counter_label = QLabel("Обработано: 0 из 0 (0%)", self)
-        self.counter_label.setGeometry(12, 456, 500, 20)
+        # Нижняя зона: управление и мониторинг — ТЗ п.5.2
         self.progress = QProgressBar(self)
-        self.progress.setGeometry(12, 478, 620, 16)
+        self.progress.setGeometry(12, 466, 620, 16)
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
         self.progress.setTextVisible(False)
@@ -238,15 +254,19 @@ class ImageConverterWindow(QWidget):
             f"QProgressBar {{ background-color: #2D2D2D; border: none; border-radius: 4px; }}"
             f"QProgressBar::chunk {{ background-color: {ACCENT}; border-radius: 4px; }}"
         )
+        # Счётчик под прогресс-баром — ТЗ п.5.2
+        self.counter_label = QLabel("Обработано: 0 из 0 файлов (0% объектов)", self)
+        self.counter_label.setGeometry(12, 488, 620, 20)
+
         self.btn_cancel = QPushButton("Прервать", self)
-        self.btn_cancel.setGeometry(640, 470, 70, 30)
+        self.btn_cancel.setGeometry(640, 458, 70, 30)
         self.btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_cancel.setStyleSheet(
             f"QPushButton {{ background-color: {ERROR}; color: white; border: none; border-radius: 6px; }}"
         )
         self.btn_cancel.clicked.connect(self.on_abort)
-        self.btn_start = QPushButton("Начать", self)
-        self.btn_start.setGeometry(716, 470, 72, 30)
+        self.btn_start = QPushButton("Старт", self)
+        self.btn_start.setGeometry(716, 458, 72, 30)
         self.btn_start.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_start.setStyleSheet(
             f"QPushButton {{ background-color: {ACCENT}; color: white; border: none; border-radius: 6px; }}"
@@ -255,9 +275,9 @@ class ImageConverterWindow(QWidget):
         self.btn_start.clicked.connect(self.on_start)
 
         self.status_label = QLabel("Ожидание источника…", self)
-        self.status_label.setGeometry(12, 502, 776, 20)
+        self.status_label.setGeometry(12, 512, 776, 20)
         self.out_label = QLabel("", self)
-        self.out_label.setGeometry(12, 526, 776, 20)
+        self.out_label.setGeometry(12, 536, 776, 20)
         self._refresh_out_label()
 
     def _sub(self, text: str) -> QLabel:
@@ -275,6 +295,7 @@ class ImageConverterWindow(QWidget):
         self.sig_busy.connect(self._on_busy)
         self.sig_error.connect(self._on_error)
         self.sig_drop_error.connect(self._flash_drop_error)
+        self.sig_beep.connect(QApplication.beep)  # ТЗ п.5.3 — системный сигнал
 
     # ---------- helpers ----------
     def _interp_value(self) -> str:
@@ -346,18 +367,23 @@ class ImageConverterWindow(QWidget):
 
     def _on_progress(self, done: int, total: int):
         frac = done / max(1, total)
+        pct = int(frac * 100)
         self.progress.setRange(0, 100)
-        self.progress.setValue(int(frac * 100))
-        self.sig_counter.emit(f"Обработано: {done} из {total} ({int(frac * 100)}%)")
+        self.progress.setValue(pct)
+        # ТЗ п.5.2: «Обработано: X из Y файлов (Z% объектов)»
+        self.sig_counter.emit(f"Обработано: {done} из {total} файлов ({pct}% объектов)")
 
     def _on_busy(self, busy: bool):
+        # Этап валидации/конвертации: настройки заморожены — ТЗ п.5.3
         for w in (self.fmt_box, self.interp_box, self.quality, self.w_entry,
-                  self.h_entry, self.resize_check, self.keep_check, self.btn_browse):
+                  self.h_entry, self.resize_check, self.keep_check,
+                  self.btn_browse, self.btn_outdir):
             w.setEnabled(not busy)
         if busy:
             self.progress.setRange(0, 0)  # бесконечная анимация «загрузка» — ТЗ п.5.3
         else:
             self.progress.setRange(0, 100)
+            self._on_resize_toggle()  # поля W/H зависят от чекбокса
 
     def _on_error(self, msg: str):
         QMessageBox.critical(self, "Ошибка валидации", msg)
@@ -413,7 +439,6 @@ class ImageConverterWindow(QWidget):
         self.sig_busy.emit(True)
         self.sig_start_enabled.emit(False)
         self.sig_status.emit("Запуск сквозной валидации…")
-        self._log(f"Загружен: {path.name}")
         threading.Thread(target=self._validate_bg, args=(path,), daemon=True).start()
 
     def _validate_bg(self, path: Path):
@@ -421,36 +446,48 @@ class ImageConverterWindow(QWidget):
             if not path.exists():
                 raise ValidationError(f"Путь не найден: {path}")
             if is_archive(path):
-                self._log("Запуск сквозной валидации… проверка сигнатур")
+                self._log(f"Архивом загружен файл: {path.name}")
+                self._log("Запуск сквозной валидации... проверка сигнатур")
+                # Чистый кэш перед распаковкой — ТЗ п.1.5, п.2.3
+                ConfigManager.clear_cache(self.cache_dir)
                 files = validate_and_extract(path, self.cache_dir)
-                self._log(f"Валидация успешна. Найдено {len(files)} изображения")
+                self._log(f"Валидация успешна. Найдено {len(files)} изображений")
+                self.source_from_cache = True
             elif path.is_dir():
+                self._log(f"Папка загружена: {path.name}")
                 files = collect_from_folder(path)
                 if not files:
                     raise ValidationError("В папке нет изображений PNG/JPEG/BMP")
-                self._log(f"Найдено {len(files)} изображения в папке")
+                self._log(f"Валидация успешна. Найдено {len(files)} изображений в папке")
+                self.source_from_cache = False
             elif path.is_file():
-                from archive_validator import SUPPORTED_EXTS, detect_image_kind
-                if path.suffix.lower() not in SUPPORTED_EXTS:
-                    raise ValidationError(VALIDATION_ERROR_MSG)
-                if detect_image_kind(path.read_bytes()[:4]) is None:
-                    raise ValidationError(VALIDATION_ERROR_MSG)
-                files = [path]
+                # Одиночный файл — валидация в сервисном слое (ТЗ п.1.4)
+                from archive_validator import validate_single_image
+                self._log(f"Загружен файл: {path.name}")
+                files = [validate_single_image(path)]
+                self._log("Валидация успешна. Найдено 1 изображение")
+                self.source_from_cache = False
             else:
                 raise ValidationError(f"Неподдерживаемый источник: {path}")
             self.source_files = files
             self.sig_source.emit(f"{path.name} — {len(files)} файл(ов) готово к конвертации")
-            self.sig_status.emit("Валидация успешна. Нажмите «Начать».")
+            self.sig_status.emit("Валидация успешна. Нажмите «Старт».")
             self.sig_start_enabled.emit(True)
         except ValidationError as e:
-            self._log(f"Ошибка: {e}")
+            self._log(f"Ошибка: {e}. Процесс остановлен.")
             self.sig_drop_error.emit()
             self.sig_error.emit(str(e))
             self.sig_status.emit("Ошибка валидации.")
             self.source_files = []
+            self.source_from_cache = False
             self.sig_start_enabled.emit(False)
         except Exception as e:  # noqa: BLE001
-            self._log(f"Ошибка: {e}")
+            self._log(f"Ошибка: {e}. Процесс остановлен.")
+            # Любая нештатная ситуация: кэш стирается, источник сбрасывается (ТЗ п.2.3)
+            ConfigManager.clear_cache(self.cache_dir)
+            self.source_files = []
+            self.source_from_cache = False
+            self.sig_source.emit(HINT_TEXT)
             self.sig_start_enabled.emit(False)
         finally:
             self.sig_busy.emit(False)
@@ -512,11 +549,20 @@ class ImageConverterWindow(QWidget):
             else:
                 self._log(f"Готово. Результаты: {dst}")
                 self.sig_status.emit("Конвертация завершена.")
+                # ТЗ п.5.3: по завершении — негромкий системный звуковой сигнал
+                self.sig_beep.emit()
         finally:
+            # ТЗ п.1.5: файлы кэша удаляются безвозвратно после сбора результатов
             ConfigManager.clear_cache(self.cache_dir)
+            if self.source_from_cache:
+                # Файлы из кэша уничтожены — нужна новая валидация для следующего цикла
+                self.source_files = []
+                self.source_from_cache = False
+                self.sig_source.emit(HINT_TEXT)
+                self._log("Кэш .cache_processing очищен. Для следующего цикла перетащите архив заново.")
             self.working = False
             self.sig_busy.emit(False)
-            if self.source_files and not self.tm.aborted:
+            if self.source_files:
                 self.sig_start_enabled.emit(True)
 
     def on_abort(self):
@@ -528,6 +574,8 @@ class ImageConverterWindow(QWidget):
 
 def run() -> int:
     app = QApplication([])
+    # Основной шрифт интерфейса: Segoe UI 10 пт — ТЗ п.5.1
+    app.setFont(QFont("Segoe UI", 10))
     win = ImageConverterWindow()
     win.show()
     return app.exec()

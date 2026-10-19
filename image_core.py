@@ -5,10 +5,12 @@ from pathlib import Path
 
 from PIL import Image
 
+# ТЗ п.2.1: три метода интерполяции, Lanczos — по умолчанию
+_RESAMPLING = getattr(Image, "Resampling", Image)  # Pillow>=9.1
 INTERPOLATION_MAP = {
-    "Bilinear": Image.BILINEAR,
-    "Bicubic": Image.BICUBIC,
-    "Lanczos": Image.LANCZOS,
+    "Bilinear": _RESAMPLING.BILINEAR,
+    "Bicubic": _RESAMPLING.BICUBIC,
+    "Lanczos": _RESAMPLING.LANCZOS,
 }
 
 OUTPUT_EXT = {"WebP": ".webp", "JPEG": ".jpg"}

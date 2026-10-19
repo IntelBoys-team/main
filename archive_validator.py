@@ -139,6 +139,26 @@ def validate_and_extract(archive: Path, cache_dir: Path) -> list[Path]:
     return sorted(out)
 
 
+def validate_single_image(path: Path) -> Path:
+    """Валидация одиночного файла (расширение + Magic Number) — ТЗ п.2.3.
+
+    Вызывается из UI через сервисный слой, чтобы в Presentation Layer
+    не было алгоритмов валидации — ТЗ п.1.4.
+    """
+    path = Path(path)
+    if not path.is_file():
+        raise ValidationError(f"Файл не найден: {path}")
+    if path.suffix.lower() not in SUPPORTED_EXTS:
+        raise ValidationError(VALIDATION_ERROR_MSG)
+    try:
+        header = path.read_bytes()[:4]
+    except OSError as e:
+        raise ValidationError(f"{VALIDATION_ERROR_MSG}: {path.name} не читается") from e
+    if detect_image_kind(header) is None:
+        raise ValidationError(f"{VALIDATION_ERROR_MSG}: {path.name}")
+    return path
+
+
 def collect_from_folder(folder: Path) -> list[Path]:
     """Сбор изображений из папки (рекурсивно). Неподдерживаемые пропускаются."""
     folder = Path(folder)
