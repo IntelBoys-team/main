@@ -43,12 +43,29 @@ def get_cache_dir() -> Path:
 
 
 class ConfigManager:
+    """Хранение настроек в памяти + синхронизация с config.json.
+
+    self.data всегда содержит все ключи из DEFAULTS (значения нормализованы).
+    Добавляя новую настройку — добавьте её в DEFAULTS, и она автоматически
+    подхватится при чтении/записи.
+    """
+
     def __init__(self, path: Path | None = None):
+        """path=None → %APPDATA%/PixelForge/config.json (или ./config.json)."""
         self.path = path or get_config_path()
         self.data: dict = dict(DEFAULTS)
         self.load()
 
     def load(self) -> dict:
+        """Чтение config.json с нормализацией.
+
+        - отсутствующий/битый JSON → дефолты;
+        - значения вне допустимых диапазонов приводятся к норме
+          (quality 10..100, известные output_format/interpolation);
+        - лишние ключи в файле игнорируются.
+
+        Возвращает self.data.
+        """
         try:
             if self.path.exists():
                 with open(self.path, "r", encoding="utf-8") as f:
@@ -70,6 +87,7 @@ class ConfigManager:
         return self.data
 
     def save(self) -> None:
+        """Запись data в config.json (UTF-8, indent=2). Ошибки ОС глотаются."""
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with open(self.path, "w", encoding="utf-8") as f:
@@ -78,12 +96,15 @@ class ConfigManager:
             pass
 
     def get(self, key: str, default=None):
+        """Значение из data; если его нет — default; если default is None — DEFAULTS[key]."""
         return self.data.get(key, default if default is not None else DEFAULTS.get(key))
 
     def set(self, key: str, value) -> None:
+        """Изменение в памяти БЕЗ записи на диск (для нескольких правок — update())."""
         self.data[key] = value
 
     def update(self, mapping: dict) -> None:
+        """Изменение нескольких ключей и немедленное сохранение на диск."""
         self.data.update(mapping)
         self.save()
 

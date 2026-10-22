@@ -1,4 +1,9 @@
-"""Presentation Layer / UI — Single-Page 800x600 Dark Mode. Только сигналы в Service Layer."""
+"""Presentation Layer / UI — Single-Page 800x600 Dark Mode. Только сигналы в Service Layer.
+
+LEGACY: эта Tkinter/CustomTkinter-версия НЕ используется точкой входа main.py
+(основной UI — ui_pyqt.py на PyQt6). Оставлена как альтернатива; дублируйте
+изменения интерфейса в ui_pyqt.py.
+"""
 from __future__ import annotations
 
 import threading
@@ -40,6 +45,10 @@ FONT_TITLE = ("Segoe UI", 14, "bold")
 
 
 class ImageConverterApp:
+    """Главный класс legacy-UI. Структура повторяет ImageConverterWindow из ui_pyqt.py
+    (build → config↔widgets → validate_bg → convert_bg), но обновления UI переносятся
+    в GUI-поток через root.after(0, ...) вместо Qt-сигналов.
+    """
     def __init__(self):
         if not HAS_CTK:
             raise RuntimeError("Установите customtkinter: pip install -r requirements.txt")

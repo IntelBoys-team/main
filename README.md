@@ -2,11 +2,16 @@
 
 3-Tier Desktop: Presentation (`ui_pyqt.py`, PyQt6) / Service (`thread_manager.py`, `archive_validator.py`, `image_core.py`) / Data (`config_manager.py`).
 
+## Документация для разработчиков
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — как устроен проект, жизненный цикл сценария, модель потоков, правила расширения.
+- [docs/API.md](docs/API.md) — справочник по всем функциям, классам, параметрам и исключениям.
+
 ## Запуск
 ```bat
 python -m pip install -r requirements.txt
 python main.py
 ```
+Точка входа — `main.py` → `ui_pyqt.run()` (`ui_app.py` — legacy-версия на Tkinter, не используется).
 
 ## Соответствие ТЗ
 - Выход: WebP (default) / JPEG, качество 10–100 (default 80), интерполяция Lanczos (default) / Bicubic / Bilinear (Pillow LANCZOS/BICUBIC/BILINEAR).

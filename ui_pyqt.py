@@ -81,6 +81,12 @@ class DropFrame(QFrame):
 
 
 class ImageConverterWindow(QWidget):
+    """Главное окно PixelForge (800×600, dark mode).
+
+    Правило слоёв (ТЗ п.1.4): окно только собирает настройки, вызывает сервисный
+    слой (ThreadManager / ArchiveValidator / ConfigManager) и рисует состояние.
+    Вся коммуникация с фоновыми потоками — через сигналы sig_* (см. ниже).
+    """
     # Сигналы из фоновых потоков в GUI-поток (потокобезопасно)
     sig_log = pyqtSignal(str)
     sig_progress = pyqtSignal(int, int)
@@ -120,6 +126,11 @@ class ImageConverterWindow(QWidget):
         return f"QFrame {{ background-color: {PANEL}; border-radius: 6px; }}"
 
     def _build(self):
+        """Создание всех виджетов и раскладки (абсолютные координаты).
+
+        Зоны: дроп (12,12,776×156) → настройки (12,176,260×274) +
+        журнал (282,176,506×274) → прогресс-бар/счётчик/статус внизу.
+        """
         # Верхняя зона: импорт (Drag-and-Drop) — ТЗ п.5.2
         self.drop_frame = DropFrame(self)
         self.drop_frame.setGeometry(12, 12, 776, 156)
@@ -307,6 +318,7 @@ class ImageConverterWindow(QWidget):
         return "Lanczos"
 
     def _apply_config_to_widgets(self):
+        """Перенос значений из ConfigManager в виджеты (вызывается при старте)."""
         d = self.cfg.data
         self.fmt_box.setCurrentText(d.get("output_format", "WebP"))
         iv = d.get("interpolation", "Lanczos")
@@ -326,6 +338,7 @@ class ImageConverterWindow(QWidget):
         self._refresh_out_label()
 
     def _persist(self):
+        """Сбор значений виджетов → ConfigManager (с записью на диск)."""
         try:
             w = int(self.w_entry.text() or 1920)
         except ValueError:
@@ -366,6 +379,7 @@ class ImageConverterWindow(QWidget):
         self.log_box.append(msg)
 
     def _on_progress(self, done: int, total: int):
+        """Слот sig_progress: % прогресс-бара + текст счётчика «Обработано: X из Y…»."""
         frac = done / max(1, total)
         pct = int(frac * 100)
         self.progress.setRange(0, 100)
@@ -374,6 +388,11 @@ class ImageConverterWindow(QWidget):
         self.sig_counter.emit(f"Обработано: {done} из {total} файлов ({pct}% объектов)")
 
     def _on_busy(self, busy: bool):
+        """Слот sig_busy: заморозка настроек во время валидации/конвертации.
+
+        busy=True → прогресс-бар в режим бесконечной анимации (setRange(0, 0)) — ТЗ п.5.3.
+        busy=False → возврат к режиму 0..100 и состоянию полей W/H по чекбоксу.
+        """
         # Этап валидации/конвертации: настройки заморожены — ТЗ п.5.3
         for w in (self.fmt_box, self.interp_box, self.quality, self.w_entry,
                   self.h_entry, self.resize_check, self.keep_check,
@@ -434,6 +453,11 @@ class ImageConverterWindow(QWidget):
             self._log(f"Папка вывода: {d}")
 
     def load_source(self, path: Path):
+        """Точка входа: принять источник (архив/папку/файл) и запустить валидацию.
+
+        Игнорируется, если уже идёт работа. Валидация идёт в daemon-потоке
+        (_validate_bg), чтобы не блокировать GUI.
+        """
         if self.working:
             return
         self.sig_busy.emit(True)
@@ -442,6 +466,13 @@ class ImageConverterWindow(QWidget):
         threading.Thread(target=self._validate_bg, args=(path,), daemon=True).start()
 
     def _validate_bg(self, path: Path):
+        """Фоновый поток: сквозная валидация источника (архив/папка/одиночный файл).
+
+        Успех → source_files заполнен, «Старт» разблокирован.
+        ValidationError → лог, красная рамка дропа, модальное окно, кэш стёрт.
+        Любой прочий Exception → кэш стёрт, источник сброшен к подсказке.
+        Все обновления UI — только через sig_* (потокобезопасно).
+        """
         try:
             if not path.exists():
                 raise ValidationError(f"Путь не найден: {path}")
@@ -494,6 +525,7 @@ class ImageConverterWindow(QWidget):
 
     # ---------- старт / стоп ----------
     def _output_dir(self) -> Path:
+        """Папка вывода: явная из конфига → <родитель первого файла>/Converted → ./Converted."""
         od = (self.cfg.get("output_dir", "") or "").strip()
         if od:
             return Path(od)
@@ -505,6 +537,10 @@ class ImageConverterWindow(QWidget):
         return Path.cwd() / "Converted"
 
     def on_start(self):
+        """Кнопка «Старт»: собрать kwargs из виджетов и запустить пул потоков.
+
+        Работа идёт в daemon-потоке _convert_bg, т.к. ThreadManager.start() блокирующий.
+        """
         if self.working or not self.source_files:
             return
         self._persist()
@@ -536,6 +572,11 @@ class ImageConverterWindow(QWidget):
                          daemon=True).start()
 
     def _convert_bg(self, files: list[Path], dst: Path, kwargs: dict):
+        """Фоновый поток: блокирующий запуск ThreadManager с колбэками-эмитами.
+
+        finally обязателен: очистка кэша, сброс источника-из-кэша, busy=False —
+        выполнится даже при прерывании или исключении.
+        """
         try:
             self.tm.start(
                 files, dst, kwargs,
@@ -566,6 +607,7 @@ class ImageConverterWindow(QWidget):
                 self.sig_start_enabled.emit(True)
 
     def on_abort(self):
+        """Кнопка «Прервать»: снятие флага, очистка очереди, отмена незапущенных файлов."""
         if not self.working:
             return
         self.tm.abort()
@@ -573,6 +615,7 @@ class ImageConverterWindow(QWidget):
 
 
 def run() -> int:
+    """Создание QApplication и запуск главного цикла. Возвращает код выхода Qt."""
     app = QApplication([])
     # Основной шрифт интерфейса: Segoe UI 10 пт — ТЗ п.5.1
     app.setFont(QFont("Segoe UI", 10))
