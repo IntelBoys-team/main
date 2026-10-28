@@ -4,14 +4,32 @@ from __future__ import annotations
 import shutil
 import zipfile
 from pathlib import Path
+from typing import Callable
 
-# ТЗ п.2.3: разрешённые сигнатуры
-MAGIC_PNG = b"\x89PNG"          # 89 50 4E 47
-MAGIC_JPEG = b"\xff\xd8\xff"    # FF D8 FF
-MAGIC_BMP = b"BM"               # 42 4D
+MAGIC_PNG = b"\x89PNG"
+MAGIC_JPEG = b"\xff\xd8\xff"
+MAGIC_BMP = b"BM"
+MAGIC_GIF = b"GIF8"
+MAGIC_ICO = b"\x00\x00\x01\x00"
+MAGIC_TIFF_LE = b"II*\x00"
+MAGIC_TIFF_BE = b"MM\x00*"
+MAGIC_RIFF = b"RIFF"
+MAGIC_WEBP = b"WEBP"
+MAGIC_FTYP = b"ftyp"
+MAGIC_AVIF = b"avif"
 
-SUPPORTED_EXTS = {".png", ".jpg", ".jpeg", ".bmp"}
+# Входные форматы (что можно загружать)
+SUPPORTED_EXTS = {
+    ".png", ".jpg", ".jpeg", ".bmp",
+    ".webp", ".gif", ".ico", ".tif", ".tiff",
+    ".avif",
+}
+# Выходные форматы (во что можно конвертировать)
+OUTPUT_FORMATS = {"WebP", "JPEG", "PNG", "BMP", "ICO", "GIF", "TIFF", "AVIF"}
 ARCHIVE_EXTS = {".zip", ".rar", ".7z"}
+
+# Сколько байт читаем для проверки сигнатуры (WebP/AVIF требуют 12)
+HEADER_LEN = 12
 
 VALIDATION_ERROR_MSG = (
     "Ошибка валидации: архив содержит неподдерживаемые типы данных. "
@@ -30,6 +48,16 @@ def detect_image_kind(header: bytes) -> str | None:
         return "jpeg"
     if header.startswith(MAGIC_BMP):
         return "bmp"
+    if header.startswith(MAGIC_GIF):
+        return "gif"
+    if header.startswith(MAGIC_ICO):
+        return "ico"
+    if header.startswith(MAGIC_TIFF_LE) or header.startswith(MAGIC_TIFF_BE):
+        return "tiff"
+    if len(header) >= 12 and header[:4] == MAGIC_RIFF and header[8:12] == MAGIC_WEBP:
+        return "webp"
+    if len(header) >= 12 and header[4:8] == MAGIC_FTYP and header[8:12] == MAGIC_AVIF:
+        return "avif"
     return None
 
 
@@ -46,20 +74,29 @@ def iter_zip_members(archive: Path):
             yield info.filename
 
 
-def read_zip_header(archive: Path, member: str, n: int = 4) -> bytes:
+def read_zip_header(archive: Path, member: str, n: int = HEADER_LEN) -> bytes:
     with zipfile.ZipFile(archive, "r") as zf:
         with zf.open(member, "r") as f:
             return f.read(n)
 
 
-def _validate_member_list(members: list[str], read_header) -> None:
-    """Сквозная валидация: расширение + бинарная сигнатура. Любой чужой файл = стоп."""
+def _validate_member_list(
+    members: list[str], read_header: Callable[[str], bytes] | None = None
+) -> None:
+    """Сквозная валидация: расширение + (если задан read_header) бинарная сигнатура.
+
+    read_header=None — только проверка расширений (используется для 7z: py7zr
+    не умеет читать члены архива в память, сигнатуры проверяются после
+    распаковки, см. финальный чек в validate_and_extract).
+    """
     if not members:
         raise ValidationError(VALIDATION_ERROR_MSG + " (архив пуст)")
     bad: list[str] = []
     for name in members:
         if not _is_supported_name(name):
             bad.append(name)
+            continue
+        if read_header is None:
             continue
         try:
             header = read_header(name)
@@ -92,14 +129,17 @@ def validate_and_extract(archive: Path, cache_dir: Path) -> list[Path]:
             except ImportError as e:
                 raise ValidationError("Для .7z установите зависимость py7zr") from e
             with py7zr.SevenZipFile(archive, "r") as zf:
+                if zf.needs_password():
+                    raise ValidationError(VALIDATION_ERROR_MSG + " (архив защищён паролем)")
+                # getnames() разбирает заголовок архива: битый заголовок = ошибка здесь
                 names = zf.getnames()
                 members = [n for n in names if not n.endswith("/")]
-                def _rh(n: str) -> bytes:
-                    d = zf.read([n])
-                    buf = d[n].read() if hasattr(d[n], "read") else bytes(d[n].getvalue())
-                    return buf[:4]
-                _validate_member_list(members, _rh)
+                # py7zr (>=1.0) не предоставляет чтения членов в память —
+                # расширения проверяем по оглавлению, а сигнатуры — после
+                # распаковки (финальный чек ниже ловит и переименованные файлы)
+                _validate_member_list(members)
                 cache_dir.mkdir(parents=True, exist_ok=True)
+                # Повреждённый LZMA-поток бросает lzma.LZMAError прямо здесь
                 zf.extractall(cache_dir)
         elif suffix == ".rar":
             try:
@@ -110,7 +150,7 @@ def validate_and_extract(archive: Path, cache_dir: Path) -> list[Path]:
                 members = [i.filename for i in rf.infolist() if not i.is_dir()]
                 def _rh2(n: str) -> bytes:
                     with rf.open(n) as f:
-                        return f.read(4)
+                        return f.read(HEADER_LEN)
                 _validate_member_list(members, _rh2)
                 cache_dir.mkdir(parents=True, exist_ok=True)
                 rf.extractall(cache_dir)
@@ -122,13 +162,18 @@ def validate_and_extract(archive: Path, cache_dir: Path) -> list[Path]:
     except zipfile.BadZipFile as e:
         shutil.rmtree(cache_dir, ignore_errors=True)
         raise ValidationError(f"{VALIDATION_ERROR_MSG} (архив повреждён)") from e
+    except Exception as e:
+        # rarfile.NotRarFile, lzma.LZMAError, ошибки пароля и прочие
+        # «сырые» исключения → валидационная ошибка, а не HTTP 500 у API
+        shutil.rmtree(cache_dir, ignore_errors=True)
+        raise ValidationError(f"{VALIDATION_ERROR_MSG} (архив повреждён: {e})") from e
 
     # Собрать извлечённые изображения
     out = [p for p in cache_dir.rglob("*") if p.is_file() and p.suffix.lower() in SUPPORTED_EXTS]
     # Финальная проверка сигнатур на диске (защита от переименованных файлов)
     for p in list(out):
         try:
-            if detect_image_kind(p.read_bytes()[:4]) is None:
+            if detect_image_kind(p.read_bytes()[:HEADER_LEN]) is None:
                 shutil.rmtree(cache_dir, ignore_errors=True)
                 raise ValidationError(f"{VALIDATION_ERROR_MSG}: {p.name}")
         except OSError:
@@ -140,18 +185,14 @@ def validate_and_extract(archive: Path, cache_dir: Path) -> list[Path]:
 
 
 def validate_single_image(path: Path) -> Path:
-    """Валидация одиночного файла (расширение + Magic Number) — ТЗ п.2.3.
-
-    Вызывается из UI через сервисный слой, чтобы в Presentation Layer
-    не было алгоритмов валидации — ТЗ п.1.4.
-    """
+    """Валидация одиночного файла (расширение + Magic Number) — ТЗ п.2.3."""
     path = Path(path)
     if not path.is_file():
         raise ValidationError(f"Файл не найден: {path}")
     if path.suffix.lower() not in SUPPORTED_EXTS:
         raise ValidationError(VALIDATION_ERROR_MSG)
     try:
-        header = path.read_bytes()[:4]
+        header = path.read_bytes()[:HEADER_LEN]
     except OSError as e:
         raise ValidationError(f"{VALIDATION_ERROR_MSG}: {path.name} не читается") from e
     if detect_image_kind(header) is None:

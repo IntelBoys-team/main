@@ -1,0 +1,8 @@
+Pillow>=10.0.0
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.9
+py7zr>=0.20.0; sys_platform == "win32"
+rarfile>=4.0; sys_platform == "win32"
+pillow-avif-plugin>=1.4.4; sys_platform == "win32"  # запись AVIF (опц.)
+# Для примера api_client.py (Python-клиент): pip install requests

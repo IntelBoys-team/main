@@ -1,6 +1,4 @@
-Pillow>=10.0.0
+# Десктоп-клиент PixelForge (корень проекта).
+# Сервер со своим набором зависимостей живёт в Backend-main/ (см. Backend-main/requirements.txt).
 PyQt6>=6.6.0
-customtkinter>=5.2.0
-tkinterdnd2>=0.3.0
-py7zr>=0.20.0; sys_platform == "win32"
-rarfile>=4.0; sys_platform == "win32"
+requests>=2.28.0
