@@ -40,6 +40,7 @@ server.py             Точка входа сервера: uvicorn + FastAPI.
 api/app.py            FastAPI: REST, SSE, CORS + монтирование сайта desktop_ui/.
 api/state.py          Оркестрация источника, задач и результатов.
 api/events.py         Потокобезопасная шина SSE.
+api/sessions.py       Сессии клиентов: изоляция состояния, каталогов и SSE.
 desktop_ui/           Сайт (HTML/CSS/JS) по ТЗ п.5 — отдаётся FastAPI на "/".
 image_core.py         Service: ресайз + WebP/JPEG/PNG/BMP/ICO/GIF/TIFF/AVIF.
 archive_validator.py  Service: ZIP/7Z/RAR, Magic Numbers (PNG/JPEG/BMP/WEBP/...).

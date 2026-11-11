@@ -79,14 +79,33 @@ class Job:
     finished_at: float | None = None
 
 
-class AppState:
-    """Single shared pipeline state for the desktop window and the web client."""
+def get_sessions_root() -> Path:
+    """Каталог сессий: temp/PixelForge/sessions/<sid>/ (per-session изоляция)."""
+    d = Path(tempfile.gettempdir()) / APP_NAME / "sessions"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
-    def __init__(self) -> None:
-        self.cfg = ConfigManager()
+
+class AppState:
+    """Pipeline state одного клиента (одной сессии).
+
+    Сессии изолированы: свои uploads/outputs/downloads, свой кэш распаковки,
+    свой config.json, свой EventBus/SSE. См. api/sessions.py.
+    """
+
+    def __init__(self, session_id: str | None = None) -> None:
+        if session_id:
+            # Per-session: всё своё, включая кэш и config.json.
+            runtime = get_sessions_root() / session_id
+            self.cache_dir = runtime / "cache"
+            cfg_path = runtime / "config.json"
+        else:
+            # Совместимое поведение без сессии: общие каталоги и config.json.
+            runtime = Path(tempfile.gettempdir()) / APP_NAME
+            self.cache_dir = get_cache_dir()
+            cfg_path = None
+        self.cfg = ConfigManager(cfg_path)
         self.bus = EventBus()
-        self.cache_dir = get_cache_dir()
-        runtime = Path(tempfile.gettempdir()) / APP_NAME
         self.runtime_dir = runtime
         self.uploads_dir = runtime / "uploads"
         self.outputs_dir = runtime / "outputs"
@@ -150,6 +169,15 @@ class AppState:
         with self._lock:
             self.job.status = status
         self._publish_state()
+
+    @property
+    def busy(self) -> bool:
+        """Занята ли сессия валидацией/конвертацией (нельзя удалять)."""
+        with self._lock:
+            return self._running or self.job.status in (
+                STATUS_VALIDATING,
+                STATUS_CONVERTING,
+            )
 
     # ------------------------------------------------------------------ config
     def config_snapshot(self) -> dict[str, Any]:
@@ -421,6 +449,7 @@ class AppState:
         existing = [p for p in files if p.is_file()]
         if not existing:
             raise ValueError("Нет результатов для скачивания")
+        self.downloads_dir.mkdir(parents=True, exist_ok=True)
         zip_path = self.downloads_dir / f"PixelForge-{job_id}.zip"
         with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
             used: set[str] = set()

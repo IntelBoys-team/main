@@ -1,6 +1,7 @@
 """Service Layer — Archive Validator: потоковое чтение + сквозная валидация Magic Numbers."""
 from __future__ import annotations
 
+import os
 import shutil
 import zipfile
 from pathlib import Path
@@ -39,6 +40,57 @@ VALIDATION_ERROR_MSG = (
 
 class ValidationError(Exception):
     pass
+
+
+# ---------------------------------------------------------------- RAR-инструмент
+# rarfile только читает заголовки сам, а распаковку отдаёт внешнему
+# unrar/7z. На Windows 7-Zip обычно установлен, но не добавлен в PATH,
+# поэтому ищем его в типовых местах и подставляем в rarfile вручную.
+_RAR_TOOL_READY = False
+
+
+def _rar_tool_candidates() -> list[tuple[str, Path]]:
+    """(имя настройки rarfile, путь) — кандидаты на внешний инструмент."""
+    sevenzip: list[Path] = []
+    for env in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"):
+        base = os.environ.get(env)
+        if base:
+            sevenzip.append(Path(base) / "7-Zip" / "7z.exe")
+    candidates = [("SEVENZIP_TOOL", p) for p in sevenzip]
+    # bsdtar в Windows называется tar.exe (libarchive читает RAR)
+    candidates.append(
+        ("BSDTAR_TOOL", Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "tar.exe")
+    )
+    return candidates
+
+
+def ensure_rar_tool() -> None:
+    """Гарантирует рабочий инструмент для rarfile (иначе .rar → ValidationError)."""
+    global _RAR_TOOL_READY
+    if _RAR_TOOL_READY:
+        return
+    try:
+        import rarfile
+    except ImportError:
+        return
+    try:
+        rarfile.tool_setup()
+        _RAR_TOOL_READY = True
+        return
+    except rarfile.RarCannotExec:
+        pass
+    for setting, candidate in _rar_tool_candidates():
+        if not candidate.is_file():
+            continue
+        setattr(rarfile, setting, str(candidate))
+        rarfile.CURRENT_SETUP = None
+        try:
+            rarfile.tool_setup()
+            _RAR_TOOL_READY = True
+            return
+        except rarfile.RarCannotExec:
+            continue
+    rarfile.CURRENT_SETUP = None
 
 
 def detect_image_kind(header: bytes) -> str | None:
@@ -146,6 +198,7 @@ def validate_and_extract(archive: Path, cache_dir: Path) -> list[Path]:
                 import rarfile
             except ImportError as e:
                 raise ValidationError("Для .rar установите зависимость rarfile") from e
+            ensure_rar_tool()
             with rarfile.RarFile(archive, "r") as rf:
                 members = [i.filename for i in rf.infolist() if not i.is_dir()]
                 def _rh2(n: str) -> bytes:

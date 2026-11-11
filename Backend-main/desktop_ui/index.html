@@ -17,7 +17,7 @@
   <main class="app">
     <!-- Верхняя зона: Drag-and-Drop -->
     <section class="dropzone" id="dropzone" tabindex="0" role="button"
-             aria-label="Перетащите папку или архив, либо нажмите Обзор">
+             aria-label="Нажмите, чтобы выбрать файл, или перетащите папку или архив с изображениями">
       <div class="drop-info">
         <div class="drop-icon" aria-hidden="true">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"
@@ -26,17 +26,17 @@
           </svg>
         </div>
         <p class="drop-hint" id="sourceInfo">
-          Перетащите сюда папку или архив с изображениями (.zip, .rar, .7z)
-          или нажмите кнопку «Обзор»
+          Перетащите сюда папку или архив с изображениями (.zip, .7z)
+          или нажмите, чтобы выбрать файл
         </p>
       </div>
       <div class="drop-actions">
-        <button class="btn btn-primary" id="browseBtn" type="button">Обзор</button>
+        <button class="btn btn-primary" id="downloadBtn" type="button" disabled>Скачать</button>
         <button class="btn btn-secondary" id="archiveBtn" type="button">Архив</button>
-        <button class="btn btn-secondary" id="outDirBtn" type="button">Папка вывода</button>
+        <!-- <button class="btn btn-secondary" id="outDirBtn" type="button">Папка вывода</button> -->
       </div>
       <input type="file" id="fileInput"
-             accept=".zip,.7z,.rar,.png,.jpg,.jpeg,.bmp,.webp,.gif,.ico,.tif,.tiff,.avif"
+             accept=".zip,.7z,.png,.jpg,.jpeg,.bmp,.webp,.gif,.ico,.tif,.tiff,.avif"
              multiple hidden>
       <input type="file" id="dirInput" webkitdirectory multiple hidden>
     </section>

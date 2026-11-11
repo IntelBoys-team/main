@@ -7,12 +7,50 @@ REST/SSE API пакетной конвертации изображений (PNG
 - **Базовый URL:** `http://127.0.0.1:8000` (по умолчанию)
 - **Запуск:** `python server.py [--host HOST] [--port PORT]`
 - **Swagger UI:** `http://127.0.0.1:8000/docs`
-- **CORS:** открыт полностью (`*`), сервер готов к вызовам из браузера.
+- **CORS:** открыт (`*`), но **без credentials** — внешним браузерным клиентам
+  нужно передавать свой идентификатор сессии (см. «Сессии»).
 - **Версия API:** `2.0.0` (проверить: `GET /api/health`)
 
-> ⚠️ **Важно:** сервер — **однопользовательский**. Состояние источника и задачи
-> глобальное: новый источник сбрасывает предыдущий, конвертация может идти
-> только одна. Все изменения рассылаются всем подключённым SSE-слушателям.
+> **Состояние изолировано по сессиям.** У каждого клиента (вкладка браузера,
+> desktop-процесс, API-скрипт) свой набор: источник, задача, каталоги
+> загрузок/результатов/скачиваний, кэш распаковки, `config.json`, SSE-поток и
+> `GET /api/download` — чужие файлы через API недоступны. Внутри одной сессии
+> действует прежнее правило: новый источник сбрасывает предыдущий, конвертация
+> может идти только одна, все SSE-события уходят только слушателям своей сессии.
+
+---
+
+## Сессии
+
+Идентификатор сессии определяется по убыванию приоритета:
+
+1. заголовок `X-Session-Id: <id>` — для внешних API-клиентов (в т.ч. CORS);
+2. query-параметр `?session=<id>` — для `EventSource` cross-origin
+   (браузерный `EventSource` не умеет задавать заголовки);
+3. cookie `pf_session` — браузер и desktop-клиент: `requests.Session` шлёт её
+   автоматически, **отдельных действий не требуется**;
+4. если идентификатора нет — сервер генерирует его и отвечает `Set-Cookie`.
+
+Формат id: `[A-Za-z0-9_-]{8,64}` (штатная генерация — `uuid4().hex`).
+Невалидный `X-Session-Id` → `400`.
+
+Каждая сессия живёт в `temp/PixelForge/sessions/<sid>/`:
+`uploads/`, `outputs/`, `downloads/`, `cache/`, `config.json`.
+
+Неактивные сессии (нет конвертации/валидации, нет открытого SSE, нет запросов
+6 часов) удаляет фоновая уборка; осиротевшие каталогы прошлых запусков
+сервера — через 24 часа. Каталоги переживают рестарт сервера (файлы остаются
+на диске), но состояние задачи хранится в памяти — после рестарта задача
+снова `idle`.
+
+```bash
+# stateless-скрипт: заведите свой id и передавайте его во всех запросах
+SID=$(python -c "import uuid;print(uuid.uuid4().hex)")
+curl -H "X-Session-Id: $SID" -F "file=@photos.zip" http://127.0.0.1:8000/api/source/upload
+curl -H "X-Session-Id: $SID" -X POST http://127.0.0.1:8000/api/convert \
+  -H "Content-Type: application/json" -d '{"output_format":"WebP"}'
+curl -H "X-Session-Id: $SID" -OJ http://127.0.0.1:8000/api/download
+```
 
 ---
 
@@ -243,15 +281,23 @@ client.download_zip("result.zip")
 
 Пример для браузера (JS, без зависимостей):
 
+> Сайт `desktop_ui/` работает **same-origin** — cookie ставится сама, ничего
+> добавлять не нужно. Для cross-origin запросов заведите свой id и передавайте
+> его в заголовке `X-Session-Id`, а для `EventSource` — в `?session=`.
+
 ```js
 const BASE = "http://127.0.0.1:8000";
+const SID = crypto.randomUUID().replaceAll("-", ""); // свой id сессии
+const withSession = { "X-Session-Id": SID };
 
 async function convertFiles(files, settings = {}) {
   const form = new FormData();
   for (const f of files) form.append("file", f);
-  const src = await fetch(`${BASE}/api/source/batch`, { method: "POST", body: form }).then(r => r.json());
+  const src = await fetch(`${BASE}/api/source/batch`, {
+    method: "POST", body: form, headers: withSession,
+  }).then(r => r.json());
 
-  const es = new EventSource(`${BASE}/api/events`);
+  const es = new EventSource(`${BASE}/api/events?session=${SID}`);
   const done = new Promise((resolve) => {
     es.addEventListener("message", (e) => {
       const ev = JSON.parse(e.data);
@@ -264,10 +310,10 @@ async function convertFiles(files, settings = {}) {
 
   await fetch(`${BASE}/api/convert`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...withSession },
     body: JSON.stringify({ output_format: "WebP", quality: 85, ...settings }),
   });
 
-  return { source: src, job: await done };  // скачать: fetch(`${BASE}/api/download`)
+  return { source: src, job: await done };  // скачать: fetch(`${BASE}/api/download`, { headers: withSession })
 }
 ```

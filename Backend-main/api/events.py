@@ -25,6 +25,12 @@ class EventBus:
         with self._lock:
             self._subscribers.discard(q)
 
+    @property
+    def subscriber_count(self) -> int:
+        """Число открытых SSE-подключений (для уборки неактивных сессий)."""
+        with self._lock:
+            return len(self._subscribers)
+
     def publish(self, event: dict[str, Any]) -> None:
         with self._lock:
             subscribers = list(self._subscribers)

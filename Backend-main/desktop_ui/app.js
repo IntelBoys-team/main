@@ -11,17 +11,17 @@
   const $ = (id) => document.getElementById(id);
   const API_BASE = ""; // same-origin: сайт и API на одном адресе
   const HINT =
-    "Перетащите сюда папку или архив с изображениями (.zip, .rar, .7z) " +
-    "или нажмите кнопку «Обзор»";
+    "Перетащите сюда папку или архив с изображениями (.zip, .7z) " +
+    "или нажмите, чтобы выбрать файл";
   const IMAGE_RE = /\.(png|jpe?g|bmp|webp|gif|ico|tiff?|avif)$/i;
-  const ARCHIVE_RE = /\.(zip|7z|rar)$/i;
+  const ARCHIVE_RE = /\.(zip|7z)$/i;
+  const RAR_RE = /\.rar$/i;
 
   const el = {
     dropzone: $("dropzone"),
     sourceInfo: $("sourceInfo"),
-    browseBtn: $("browseBtn"),
+    downloadBtn: $("downloadBtn"),
     archiveBtn: $("archiveBtn"),
-    outDirBtn: $("outDirBtn"),
     fileInput: $("fileInput"),
     dirInput: $("dirInput"),
     settingsPanel: $("settingsPanel"),
@@ -299,6 +299,13 @@
     const files = [...fileList];
     if (!files.length) return;
 
+    // RAR в веб-части запрещён (ТЗ): просьба пересобрать архив в ZIP/7Z.
+    if (files.some((f) => RAR_RE.test(f.name))) {
+      showError("Файлы .rar не поддерживаются в веб-версии. Пересоберите архив в .zip или .7z.");
+      flashDropzone();
+      return;
+    }
+
     const archives = files.filter((f) => ARCHIVE_RE.test(f.name));
     const images = files.filter((f) => IMAGE_RE.test(f.name));
 
@@ -312,7 +319,7 @@
       return;
     }
     if (!images.length) {
-      showError("Поддерживаются изображения PNG/JPG/BMP/WEBP/GIF/ICO/TIFF/AVIF и архивы ZIP/7Z/RAR.");
+      showError("Поддерживаются изображения PNG/JPG/BMP/WEBP/GIF/ICO/TIFF/AVIF и архивы ZIP/7Z.");
       flashDropzone();
       return;
     }
@@ -365,9 +372,7 @@
       el.width,
       el.height,
       el.keepAspect,
-      el.browseBtn,
       el.archiveBtn,
-      el.outDirBtn,
     ];
     for (const control of controls) control.disabled = busy;
     el.settingsPanel.classList.toggle("disabled", busy);
@@ -416,6 +421,8 @@
     const ready = Boolean(state.source && state.source.ready);
     el.startBtn.disabled = !ready || busy || state.offline;
     el.abortBtn.disabled = !converting;
+    // Скачать можно, только когда есть результаты конвертации.
+    el.downloadBtn.disabled = !job.can_download || busy || state.offline;
     renderOut();
   }
 
@@ -521,8 +528,41 @@
       }
       return;
     }
-    // Fallback для браузера: выбор папки через webkitdirectory.
-    el.dirInput.click();
+    // В браузере область импорта открывает обычный диалог выбора файла.
+    // Для выбора папки остаётся отдельная поддержка Drag-and-Drop/dirInput.
+    el.fileInput.click();
+  }
+
+  async function downloadResults() {
+    if (el.downloadBtn.disabled) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/download`);
+      if (!res.ok) {
+        let detail = `HTTP ${res.status}`;
+        try {
+          const data = await res.json();
+          if (data && data.detail) detail = data.detail;
+        } catch {
+          /* не JSON — оставляем HTTP-статус */
+        }
+        throw new Error(detail);
+      }
+      const blob = await res.blob();
+      const dispo = res.headers.get("content-disposition") || "";
+      const match = /filename="?([^";]+)"?/i.exec(dispo);
+      const filename = match ? match[1] : "PixelForge-results.zip";
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 10000);
+      appendLog(`Скачан архив результатов: ${filename}`);
+    } catch (err) {
+      showError(`Не удалось скачать результаты: ${err.message || err}`);
+    }
   }
 
   async function chooseOutputDir() {
@@ -589,19 +629,14 @@
     el.height.addEventListener("input", schedulePersist);
     el.keepAspect.addEventListener("change", schedulePersist);
 
-    el.browseBtn.addEventListener("click", (event) => {
+    el.downloadBtn.addEventListener("click", (event) => {
       event.stopPropagation();
-      browseFolder();
+      downloadResults();
     });
     el.archiveBtn.addEventListener("click", (event) => {
       event.stopPropagation();
       el.fileInput.click();
     });
-    el.outDirBtn.addEventListener("click", (event) => {
-      event.stopPropagation();
-      chooseOutputDir();
-    });
-
     el.dropzone.addEventListener("click", (event) => {
       if (event.target.closest("button")) return;
       browseFolder();

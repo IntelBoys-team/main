@@ -5,6 +5,9 @@
 один адрес, один сервер, без отдельного статического сервера и ?api=... .
 
 CORS открыт, чтобы API оставалось доступным для внешних веб-клиентов.
+
+Состояние изолировано по сессиям (см. api/sessions.py): у каждого клиента
+свой AppState, свои каталоги, свой EventBus/SSE и свой /api/download.
 """
 from __future__ import annotations
 
@@ -27,7 +30,7 @@ from starlette.concurrency import run_in_threadpool
 
 from archive_validator import ARCHIVE_EXTS, SUPPORTED_EXTS, ValidationError
 
-from .state import AppState
+from .sessions import SessionMiddleware, SessionRegistry, sweep_loop
 
 VERSION = "2.0.0"
 
@@ -82,16 +85,22 @@ def _unique_destination(directory: Path, filename: str) -> Path:
 
 
 def create_app() -> FastAPI:
-    state = AppState()
+    registry = SessionRegistry()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        # EventBus нужен loop, чтобы пул потоков мог присылать SSE-события.
-        state.bus.bind_loop(asyncio.get_running_loop())
+        # EventBus каждой сессии доставляет SSE через главный loop сервера.
+        registry.bind_loop(asyncio.get_running_loop())
+        sweeper = asyncio.create_task(sweep_loop(registry))
         try:
             yield
         finally:
-            state.shutdown()
+            sweeper.cancel()
+            try:
+                await sweeper
+            except asyncio.CancelledError:
+                pass
+            registry.shutdown_all()
 
     app = FastAPI(
         title="PixelForge API",
@@ -99,10 +108,12 @@ def create_app() -> FastAPI:
         description="API пакетной конвертации изображений для desktop- и веб-клиентов.",
         lifespan=lifespan,
     )
-    app.state.core = state
+    app.state.sessions = registry
 
-    # Один сервер отдаёт и API (/api/*), и сайт desktop_ui/ (монтируется ниже,
-    # после всех API-маршрутов). CORS — для внешних веб-клиентов.
+    # Сессии добавляются первыми, CORS — внешним слоем: preflight-запросы
+    # отсекаются CORS и не создают сессий. Один сервер отдаёт и API (/api/*),
+    # и сайт desktop_ui/ (монтируется ниже, после всех API-маршрутов).
+    app.add_middleware(SessionMiddleware, registry=registry)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -118,22 +129,23 @@ def create_app() -> FastAPI:
 
     # ------------------------------------------------------------------ config
     @app.get("/api/config")
-    def get_config() -> dict[str, Any]:
-        return state.config_snapshot()
+    def get_config(request: Request) -> dict[str, Any]:
+        return registry.for_request(request).config_snapshot()
 
     @app.put("/api/config")
-    def put_config(payload: ConfigIn) -> dict[str, Any]:
+    def put_config(request: Request, payload: ConfigIn) -> dict[str, Any]:
         values = payload.model_dump(exclude_none=True)
-        return state.update_config(values)
+        return registry.for_request(request).update_config(values)
 
     # ------------------------------------------------------------------ source
     @app.get("/api/source")
-    def get_source() -> dict[str, Any]:
-        return state.source_snapshot()
+    def get_source(request: Request) -> dict[str, Any]:
+        return registry.for_request(request).source_snapshot()
 
     @app.post("/api/source")
-    def set_source(payload: SourcePathIn) -> dict[str, Any]:
+    def set_source(request: Request, payload: SourcePathIn) -> dict[str, Any]:
         """Путь на машине сервера. Используется desktop-клиентом."""
+        state = registry.for_request(request)
         try:
             return state.prepare_source(payload.path)
         except ValidationError as exc:
@@ -144,8 +156,9 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail=f"Не удалось открыть путь: {exc}") from exc
 
     @app.post("/api/source/upload")
-    async def upload_source(file: UploadFile = File(...)) -> dict[str, Any]:
+    async def upload_source(request: Request, file: UploadFile = File(...)) -> dict[str, Any]:
         """Один архив/изображение. Готово и для desktop, и для будущего веба."""
+        state = registry.for_request(request)
         suffix = Path(file.filename or "").suffix.lower()
         if suffix not in (ARCHIVE_EXTS | SUPPORTED_EXTS):
             raise HTTPException(
@@ -178,6 +191,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/source/batch")
     async def upload_batch(
+        request: Request,
         files: list[UploadFile] = File(...),
         name: str | None = Form(None),
     ) -> dict[str, Any]:
@@ -186,6 +200,7 @@ def create_app() -> FastAPI:
         Клиент присылает только поддерживаемые изображения; сервер дополнительно
         проверяет расширение и Magic Numbers через prepare_source(validate_images=True).
         """
+        state = registry.for_request(request)
         if not files:
             raise HTTPException(status_code=400, detail="Файлы не переданы")
         if len(files) > 5000:
@@ -229,11 +244,11 @@ def create_app() -> FastAPI:
 
     # ------------------------------------------------------------------ job
     @app.get("/api/job")
-    def get_job() -> dict[str, Any]:
-        return state.job_snapshot()
+    def get_job(request: Request) -> dict[str, Any]:
+        return registry.for_request(request).job_snapshot()
 
     @app.post("/api/convert")
-    def convert(payload: SettingsIn) -> dict[str, Any]:
+    def convert(request: Request, payload: SettingsIn) -> dict[str, Any]:
         from image_core import available_output_formats
 
         if payload.output_format not in available_output_formats():
@@ -241,6 +256,7 @@ def create_app() -> FastAPI:
                 status_code=400,
                 detail=f"Сервер не может записывать формат {payload.output_format}",
             )
+        state = registry.for_request(request)
         try:
             return state.start_conversion(payload)
         except RuntimeError as exc:
@@ -249,15 +265,16 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/api/abort")
-    def abort() -> dict[str, Any]:
-        return state.abort()
+    def abort(request: Request) -> dict[str, Any]:
+        return registry.for_request(request).abort()
 
     @app.get("/api/output/files")
-    def output_files() -> dict[str, Any]:
-        return state.job_snapshot()
+    def output_files(request: Request) -> dict[str, Any]:
+        return registry.for_request(request).job_snapshot()
 
     @app.post("/api/output/open")
-    def open_output() -> dict[str, Any]:
+    def open_output(request: Request) -> dict[str, Any]:
+        state = registry.for_request(request)
         try:
             path = state.open_output()
         except ValueError as exc:
@@ -267,8 +284,9 @@ def create_app() -> FastAPI:
         return {"path": path}
 
     @app.get("/api/download")
-    async def download() -> FileResponse:
-        """ZIP результатов. Понадобится веб-клиенту; desktop может не использовать."""
+    async def download(request: Request) -> FileResponse:
+        """ZIP результатов своей сессии. Понадобится веб-клиенту."""
+        state = registry.for_request(request)
         try:
             zip_path = await run_in_threadpool(state.build_zip)
         except ValueError as exc:
@@ -283,7 +301,11 @@ def create_app() -> FastAPI:
     # ------------------------------------------------------------------ events
     @app.get("/api/events")
     async def events(request: Request) -> StreamingResponse:
-        """SSE: log / state / source. Один контракт для desktop и веба."""
+        """SSE: log / state / source. Один контракт для desktop и веба.
+
+        Каждая сессия слушает только свой EventBus.
+        """
+        state = registry.for_request(request)
 
         async def stream():
             queue = state.bus.subscribe()
